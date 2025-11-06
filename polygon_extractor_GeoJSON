@@ -1,0 +1,892 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Download, Upload, Wand2, Trash2, Eye, EyeOff, ZoomIn, ZoomOut, Pipette, AlertCircle, Settings } from 'lucide-react';
+
+const GeologicalExtractor = () => {
+  const canvasRef = useRef(null);
+  const hiddenCanvasRef = useRef(null);
+  const [image, setImage] = useState(null);
+  const [polygons, setPolygons] = useState([]);
+  const [selectedColor, setSelectedColor] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [showPolygons, setShowPolygons] = useState(true);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [tolerance, setTolerance] = useState(40);
+  const [minArea, setMinArea] = useState(200);
+  const [simplification, setSimplification] = useState(3);
+  const [mergeDistance, setMergeDistance] = useState(5);
+  const [pickerMode, setPickerMode] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('Ready to load map');
+  const [ocrLoaded, setOcrLoaded] = useState(false);
+  const [showGeoConfig, setShowGeoConfig] = useState(false);
+  const [coordFormat, setCoordFormat] = useState('dms');
+  const [geoRefMode, setGeoRefMode] = useState(false);
+  const [currentGeoPoint, setCurrentGeoPoint] = useState(null);
+  const [geoAxisPoints, setGeoAxisPoints] = useState([]);
+  const [tempCoordValue, setTempCoordValue] = useState('');
+  const [tempCoordType, setTempCoordType] = useState('lon');
+  const [tempDMS, setTempDMS] = useState({ deg: '', min: '', sec: '', dir: 'E' });
+  const [colorNames, setColorNames] = useState({});
+  const [canvasKey, setCanvasKey] = useState(0);
+
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js';
+    script.async = true;
+    script.onload = () => {
+      setOcrLoaded(true);
+      setStatusMessage('OCR library loaded successfully');
+    };
+    script.onerror = () => {
+      setOcrLoaded(false);
+      setStatusMessage('⚠ OCR library failed to load - coordinate detection unavailable');
+    };
+    document.body.appendChild(script);
+    
+    const timeout = setTimeout(() => {
+      if (!ocrLoaded) {
+        setStatusMessage('⚠ OCR loading timeout - manual coordinate entry still available');
+      }
+    }, 10000);
+    
+    return () => {
+      if (document.body.contains(script)) document.body.removeChild(script);
+      clearTimeout(timeout);
+    };
+  }, []);
+
+  const dmsToDecimal = (deg, min, sec, dir) => {
+    let decimal = parseFloat(deg || 0) + (parseFloat(min || 0) / 60) + (parseFloat(sec || 0) / 3600);
+    if (dir === 'W' || dir === 'S') decimal = -decimal;
+    return decimal;
+  };
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    setStatusMessage('Loading image...');
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        setImage(img);
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+        setPolygons([]);
+        setStatusMessage('Image loaded! Add calibration points via Coords button.');
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleColorPick = (e) => {
+    if (pickerMode && !geoRefMode && image) {
+      const canvas = canvasRef.current;
+      const rect = canvas.getBoundingClientRect();
+      
+      const displayX = e.clientX - rect.left;
+      const displayY = e.clientY - rect.top;
+      
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      
+      const canvasX = displayX * scaleX;
+      const canvasY = displayY * scaleY;
+      
+      const x = (canvasX - pan.x) / zoom;
+      const y = (canvasY - pan.y) / zoom;
+      
+      const hiddenCanvas = hiddenCanvasRef.current;
+      const imgX = Math.floor(x * hiddenCanvas.width / canvas.width);
+      const imgY = Math.floor(y * hiddenCanvas.height / canvas.height);
+      
+      if (imgX < 0 || imgX >= hiddenCanvas.width || imgY < 0 || imgY >= hiddenCanvas.height) return;
+      
+      const ctx = hiddenCanvas.getContext('2d');
+      const data = ctx.getImageData(imgX, imgY, 1, 1).data;
+      
+      setSelectedColor({ r: data[0], g: data[1], b: data[2] });
+      setPickerMode(false);
+      setStatusMessage(`Color picked: RGB(${data[0]}, ${data[1]}, ${data[2]})`);
+    } else if (geoRefMode && image) {
+      const canvas = canvasRef.current;
+      const rect = canvas.getBoundingClientRect();
+      
+      const displayX = e.clientX - rect.left;
+      const displayY = e.clientY - rect.top;
+      
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      
+      const canvasX = displayX * scaleX;
+      const canvasY = displayY * scaleY;
+      
+      const x = (canvasX - pan.x) / zoom;
+      const y = (canvasY - pan.y) / zoom;
+      
+      console.log('Click debug v4:', {
+        event: { clientX: e.clientX, clientY: e.clientY },
+        rect,
+        display: { x: displayX, y: displayY },
+        canvasSize: { width: canvas.width, height: canvas.height },
+        scale: { x: scaleX, y: scaleY },
+        canvasCoords: { x: canvasX, y: canvasY },
+        transform: { pan, zoom },
+        final: { x, y }
+      });
+      
+      if (currentGeoPoint && (tempCoordValue || tempDMS.deg)) {
+        let coordValue;
+        if (coordFormat === 'dms') {
+          coordValue = dmsToDecimal(tempDMS.deg, tempDMS.min, tempDMS.sec, tempDMS.dir);
+        } else {
+          coordValue = parseFloat(tempCoordValue);
+        }
+        
+        if (isNaN(currentGeoPoint.x) || isNaN(currentGeoPoint.y)) {
+          console.error('Invalid pixel coordinates:', currentGeoPoint);
+          setStatusMessage('❌ Error: Invalid pixel coordinates. Try clicking the map again.');
+          return;
+        }
+        
+        if (isNaN(coordValue)) {
+          setStatusMessage('❌ Error: Invalid coordinate value. Check your input.');
+          return;
+        }
+        
+        const newPoint = {
+          x: currentGeoPoint.x, 
+          y: currentGeoPoint.y,
+          value: coordValue,
+          type: tempCoordType,
+          id: Date.now()
+        };
+        
+        console.log('Saving calibration point:', newPoint);
+        
+        setGeoAxisPoints([...geoAxisPoints, newPoint]);
+        setStatusMessage(`✓ Added ${tempCoordType === 'lon' ? 'longitude' : 'latitude'} ${coordValue.toFixed(4)}°.`);
+        setTempCoordValue('');
+        setTempDMS({ deg: '', min: '', sec: '', dir: tempCoordType === 'lon' ? 'E' : 'N' });
+        
+        setCurrentGeoPoint({ x, y });
+        setStatusMessage(`📍 Point ${geoAxisPoints.length + 2} marked! Enter coordinate.`);
+      } else {
+        console.log('Marking new point at:', { x, y });
+        setCurrentGeoPoint({ x, y });
+        setStatusMessage(`📍 Point marked at (${Math.round(x)}, ${Math.round(y)})! Enter coordinate value.`);
+      }
+    }
+  };
+
+  const colorDistance = (r1, g1, b1, r2, g2, b2) => {
+    return Math.sqrt((r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2);
+  };
+
+  const floodFill = (mask, visited, x, y, w, h) => {
+    const pixels = [];
+    const queue = [[x, y]];
+    
+    while (queue.length > 0 && pixels.length < 100000) {
+      const [cx, cy] = queue.shift();
+      const idx = cy * w + cx;
+      
+      if (cx < 0 || cx >= w || cy < 0 || cy >= h || visited[idx] || !mask[idx]) continue;
+      
+      visited[idx] = 1;
+      pixels.push([cx, cy]);
+      queue.push([cx+1, cy], [cx-1, cy], [cx, cy+1], [cx, cy-1]);
+    }
+    
+    return pixels;
+  };
+
+  const orderBoundaryPoints = (points) => {
+    if (points.length < 3) return points;
+    
+    // Create a map for fast neighbor lookup
+    const pointMap = new Map();
+    points.forEach(p => {
+      const key = `${p[0]},${p[1]}`;
+      pointMap.set(key, p);
+    });
+    
+    // Start with first point and trace the boundary
+    const ordered = [points[0]];
+    const used = new Set([`${points[0][0]},${points[0][1]}`]);
+    
+    while (ordered.length < points.length) {
+      const last = ordered[ordered.length - 1];
+      let minDist = Infinity;
+      let nearest = null;
+      
+      // Find nearest unused neighbor
+      for (const p of points) {
+        const key = `${p[0]},${p[1]}`;
+        if (used.has(key)) continue;
+        
+        const dist = Math.sqrt((p[0] - last[0]) ** 2 + (p[1] - last[1]) ** 2);
+        if (dist < minDist && dist < 3) { // Only consider very close neighbors
+          minDist = dist;
+          nearest = p;
+        }
+      }
+      
+      if (!nearest) break; // No more connected points
+      
+      ordered.push(nearest);
+      used.add(`${nearest[0]},${nearest[1]}`);
+    }
+    
+    return ordered.length >= 3 ? ordered : points;
+  };
+
+  const douglasPeucker = (points, epsilon) => {
+    if (points.length < 3) return points;
+    
+    // Find the point with maximum distance
+    let maxDist = 0;
+    let maxIndex = 0;
+    const end = points.length - 1;
+    
+    for (let i = 1; i < end; i++) {
+      const dist = perpendicularDistance(points[i], points[0], points[end]);
+      if (dist > maxDist) {
+        maxDist = dist;
+        maxIndex = i;
+      }
+    }
+    
+    // If max distance is greater than epsilon, recursively simplify
+    if (maxDist > epsilon) {
+      const left = douglasPeucker(points.slice(0, maxIndex + 1), epsilon);
+      const right = douglasPeucker(points.slice(maxIndex), epsilon);
+      return [...left.slice(0, -1), ...right];
+    } else {
+      return [points[0], points[end]];
+    }
+  };
+  
+  const perpendicularDistance = (point, lineStart, lineEnd) => {
+    const [x, y] = point;
+    const [x1, y1] = lineStart;
+    const [x2, y2] = lineEnd;
+    
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const norm = Math.sqrt(dx * dx + dy * dy);
+    
+    if (norm === 0) return Math.sqrt((x - x1) ** 2 + (y - y1) ** 2);
+    
+    return Math.abs((dy * x - dx * y + x2 * y1 - y2 * x1) / norm);
+  };
+
+  const findBoundary = (pixels) => {
+    const set = new Set(pixels.map(p => `${p[0]},${p[1]}`));
+    return pixels.filter(([x, y]) => 
+      !set.has(`${x+1},${y}`) || !set.has(`${x-1},${y}`) || 
+      !set.has(`${x},${y+1}`) || !set.has(`${x},${y-1}`)
+    );
+  };
+
+  const extractPolygons = () => {
+    if (!image || !selectedColor) {
+      setStatusMessage('Error: Load image and pick color');
+      return;
+    }
+    
+    setIsProcessing(true);
+    setStatusMessage('Extracting regions...');
+    
+    setTimeout(() => {
+      try {
+        const ctx = hiddenCanvasRef.current.getContext('2d');
+        const imageData = ctx.getImageData(0, 0, hiddenCanvasRef.current.width, hiddenCanvasRef.current.height);
+        const {width, height, data} = imageData;
+        
+        const mask = new Uint8Array(width * height);
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            if (colorDistance(data[i], data[i+1], data[i+2], selectedColor.r, selectedColor.g, selectedColor.b) <= tolerance) {
+              mask[y * width + x] = 1;
+            }
+          }
+        }
+        
+        let dilated = new Uint8Array(mask);
+        for (let iter = 0; iter < mergeDistance; iter++) {
+          const temp = new Uint8Array(dilated);
+          for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+              if (temp[y * width + x] ||
+                  temp[(y-1) * width + x] ||
+                  temp[(y+1) * width + x] ||
+                  temp[y * width + (x-1)] ||
+                  temp[y * width + (x+1)]) {
+                dilated[y * width + x] = 1;
+              }
+            }
+          }
+        }
+        
+        let eroded = new Uint8Array(dilated);
+        for (let iter = 0; iter < mergeDistance; iter++) {
+          const temp = new Uint8Array(eroded);
+          for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+              if (temp[y * width + x] &&
+                  temp[(y-1) * width + x] &&
+                  temp[(y+1) * width + x] &&
+                  temp[y * width + (x-1)] &&
+                  temp[y * width + (x+1)]) {
+                eroded[y * width + x] = 1;
+              } else {
+                eroded[y * width + x] = 0;
+              }
+            }
+          }
+        }
+        
+        const visited = new Uint8Array(width * height);
+        const found = [];
+        
+        for (let y = 0; y < height; y += 2) {
+          for (let x = 0; x < width; x += 2) {
+            if (eroded[y * width + x] && !visited[y * width + x]) {
+              const region = floodFill(eroded, visited, x, y, width, height);
+              
+              if (region.length >= minArea) {
+                const boundary = findBoundary(region);
+                
+                // Order boundary points by angle from centroid
+                const ordered = orderBoundaryPoints(boundary);
+                
+                // Apply Douglas-Peucker simplification for smooth polygons
+                const simplified = douglasPeucker(ordered, simplification * 0.5);
+                
+                if (simplified.length >= 3) {
+                  found.push({
+                    color: selectedColor,
+                    name: colorNames[`${selectedColor.r},${selectedColor.g},${selectedColor.b}`] || 'Unnamed',
+                    points: simplified.map(([px, py]) => ({
+                      x: px * canvasRef.current.width / width,
+                      y: py * canvasRef.current.height / height
+                    })),
+                    id: Date.now() + Math.random()
+                  });
+                }
+              }
+            }
+          }
+        }
+        
+        setPolygons([...polygons, ...found]);
+        setStatusMessage(`✓ Extracted ${found.length} polygons!`);
+      } catch (error) {
+        setStatusMessage(`Error: ${error.message}`);
+      }
+      setIsProcessing(false);
+    }, 100);
+  };
+
+  const pixelToGeo = (x, y) => {
+    if (geoAxisPoints.length >= 4) {
+      const lonPoints = geoAxisPoints.filter(p => p.type === 'lon').sort((a, b) => a.x - b.x);
+      const latPoints = geoAxisPoints.filter(p => p.type === 'lat').sort((a, b) => a.y - b.y);
+      
+      if (lonPoints.length >= 2 && latPoints.length >= 2) {
+        let lon = undefined;
+        if (lonPoints.length === 2) {
+          const t = (x - lonPoints[0].x) / (lonPoints[1].x - lonPoints[0].x);
+          lon = lonPoints[0].value + t * (lonPoints[1].value - lonPoints[0].value);
+        } else {
+          if (x <= lonPoints[0].x) {
+            lon = lonPoints[0].value;
+          } else if (x >= lonPoints[lonPoints.length - 1].x) {
+            lon = lonPoints[lonPoints.length - 1].value;
+          } else {
+            for (let i = 0; i < lonPoints.length - 1; i++) {
+              if (x >= lonPoints[i].x && x <= lonPoints[i + 1].x) {
+                const t = (x - lonPoints[i].x) / (lonPoints[i + 1].x - lonPoints[i].x);
+                lon = lonPoints[i].value + t * (lonPoints[i + 1].value - lonPoints[i].value);
+                break;
+              }
+            }
+          }
+        }
+        
+        let lat = undefined;
+        if (latPoints.length === 2) {
+          const t = (y - latPoints[0].y) / (latPoints[1].y - latPoints[0].y);
+          lat = latPoints[0].value + t * (latPoints[1].value - latPoints[0].value);
+        } else {
+          if (y <= latPoints[0].y) {
+            lat = latPoints[0].value;
+          } else if (y >= latPoints[latPoints.length - 1].y) {
+            lat = latPoints[latPoints.length - 1].value;
+          } else {
+            for (let i = 0; i < latPoints.length - 1; i++) {
+              if (y >= latPoints[i].y && y <= latPoints[i + 1].y) {
+                const t = (y - latPoints[i].y) / (latPoints[i + 1].y - latPoints[i].y);
+                lat = latPoints[i].value + t * (latPoints[i + 1].value - latPoints[i].value);
+                break;
+              }
+            }
+          }
+        }
+        
+        if (lon !== undefined && lat !== undefined) {
+          return { lon: lon.toFixed(6), lat: lat.toFixed(6) };
+        }
+        
+        console.error('Interpolation failed', { x, y, lon, lat, lonPoints, latPoints });
+      }
+    }
+    
+    return { lon: x.toFixed(2), lat: y.toFixed(2) };
+  };
+
+  const exportGeoJSON = () => {
+    if (polygons.length === 0) {
+      setStatusMessage('⚠ No polygons to export');
+      return;
+    }
+    
+    const hasCalibration = geoAxisPoints.length >= 4 && 
+                          geoAxisPoints.filter(p => p.type === 'lon').length >= 2 && 
+                          geoAxisPoints.filter(p => p.type === 'lat').length >= 2;
+    
+    try {
+      const features = polygons.map((poly, idx) => {
+        const coords = [];
+        
+        for (let i = 0; i < poly.points.length; i++) {
+          const p = poly.points[i];
+          const geo = pixelToGeo(p.x, p.y);
+          const lon = parseFloat(geo.lon);
+          const lat = parseFloat(geo.lat);
+          
+          if (idx === 0 && i === 0) {
+            console.log('First point:', { pixel: { x: p.x, y: p.y }, geo, parsed: { lon, lat } });
+          }
+          
+          coords.push([lon, lat]);
+        }
+        
+        coords.push(coords[0]);
+        
+        return {
+          type: 'Feature',
+          properties: {
+            rock_type: poly.name,
+            color_rgb: `${poly.color.r},${poly.color.g},${poly.color.b}`,
+            polygon_id: idx + 1
+          },
+          geometry: { type: 'Polygon', coordinates: [coords] }
+        };
+      });
+      
+      const geoJSON = {
+        type: 'FeatureCollection',
+        crs: { 
+          type: 'name', 
+          properties: { 
+            name: hasCalibration ? 'urn:ogc:def:crs:OGC:1.3:CRS84' : 'Pixel' 
+          } 
+        },
+        metadata: {
+          calibration_points: geoAxisPoints.length,
+          has_georeferencing: hasCalibration,
+          created: new Date().toISOString()
+        },
+        features
+      };
+      
+      const jsonString = JSON.stringify(geoJSON, null, 2);
+      
+      console.log('Export:', { polygons: polygons.length, hasCalibration, geoJSON });
+      
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `geological_map_${Date.now()}.geojson`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      navigator.clipboard.writeText(jsonString).catch(() => {});
+      
+      setStatusMessage(`✓ Downloaded ${polygons.length} polygons (${hasCalibration ? 'georeferenced' : 'pixel coords'})`);
+    } catch (error) {
+      console.error('Export error:', error);
+      setStatusMessage(`❌ Export failed: ${error.message}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!image) return;
+    const canvas = hiddenCanvasRef.current;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+  }, [image]);
+
+  useEffect(() => {
+    if (!canvasRef.current || !image) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    
+    if (showPolygons) {
+      polygons.forEach(poly => {
+        const hex = `#${poly.color.r.toString(16).padStart(2,'0')}${poly.color.g.toString(16).padStart(2,'0')}${poly.color.b.toString(16).padStart(2,'0')}`;
+        ctx.fillStyle = hex + '60';
+        ctx.strokeStyle = hex;
+        ctx.lineWidth = 2 / zoom;
+        ctx.beginPath();
+        poly.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+    
+    if (geoRefMode && geoAxisPoints.length > 0) {
+      geoAxisPoints.forEach(point => {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 5 / zoom, 0, Math.PI * 2);
+        ctx.fillStyle = point.type === 'lon' ? 'blue' : 'red';
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 2 / zoom;
+        ctx.stroke();
+        
+        ctx.fillStyle = 'white';
+        ctx.font = `${10/zoom}px Arial`;
+        ctx.fillText(`${point.type === 'lon' ? 'Lon' : 'Lat'}: ${point.value.toFixed(2)}°`, point.x + 8/zoom, point.y - 8/zoom);
+      });
+    }
+    
+    if (geoRefMode && currentGeoPoint && !currentGeoPoint.saved) {
+      ctx.beginPath();
+      ctx.arc(currentGeoPoint.x, currentGeoPoint.y, 7 / zoom, 0, Math.PI * 2);
+      ctx.fillStyle = 'yellow';
+      ctx.fill();
+      ctx.strokeStyle = 'black';
+      ctx.lineWidth = 2 / zoom;
+      ctx.stroke();
+      
+      ctx.fillStyle = 'black';
+      ctx.font = `${12/zoom}px Arial`;
+      ctx.fillText('Enter coordinate ↑', currentGeoPoint.x + 10/zoom, currentGeoPoint.y - 10/zoom);
+    }
+    
+    ctx.restore();
+  }, [image, polygons, zoom, pan, showPolygons, geoRefMode, geoAxisPoints, currentGeoPoint]);
+
+  const handleMouseDown = (e) => {
+    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+      e.preventDefault();
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (isPanning) {
+      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsPanning(false);
+  };
+
+  return (
+    <div className="w-full h-screen flex flex-col bg-gray-100">
+      <canvas ref={hiddenCanvasRef} style={{display:'none'}} />
+      
+      <div className="bg-white shadow p-2 space-y-2 max-h-[50vh] overflow-y-auto">
+        <div className="flex items-center justify-between sticky top-0 bg-white z-10 pb-2 border-b">
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-bold">Geological Map Extractor</h1>
+            <span className="text-xs text-gray-500 bg-yellow-100 px-2 py-0.5 rounded font-bold">v3.6</span>
+          </div>
+          <div className="flex gap-1">
+            <label className="px-3 py-1 text-sm bg-indigo-500 text-white rounded cursor-pointer">
+              <Upload size={16} className="inline mr-1" />
+              <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+              Load
+            </label>
+            <button onClick={() => setShowGeoConfig(!showGeoConfig)}
+              className={`px-3 py-1 text-sm ${showGeoConfig?'bg-blue-600':ocrLoaded?'bg-green-500':'bg-gray-500'} text-white rounded`}>
+              <Settings size={16} className="inline mr-1" />
+              Coords {geoAxisPoints.length > 0 && `(${geoAxisPoints.length})`}
+            </button>
+            <button onClick={() => setZoom(z => Math.min(z*1.2, 5))} className="p-1 bg-blue-500 text-white rounded">
+              <ZoomIn size={16} />
+            </button>
+            <button onClick={() => setZoom(z => Math.max(z/1.2, 0.5))} className="p-1 bg-blue-500 text-white rounded">
+              <ZoomOut size={16} />
+            </button>
+            <button onClick={() => setShowPolygons(!showPolygons)} className="p-1 bg-purple-500 text-white rounded">
+              {showPolygons ? <Eye size={16} /> : <EyeOff size={16} />}
+            </button>
+            <button onClick={() => setCanvasKey(k => k + 1)} className="p-1 bg-gray-500 text-white rounded" title="Refresh">
+              🔄
+            </button>
+          </div>
+        </div>
+        
+        <div className="p-2 bg-blue-100 border-2 border-blue-300 rounded flex items-center gap-2">
+          <AlertCircle size={16} className="text-blue-700" />
+          <span className="text-sm text-blue-900">{statusMessage}</span>
+        </div>
+        
+        {showGeoConfig && (
+          <div className="bg-gray-50 p-2 rounded border">
+            <h3 className="text-sm font-bold mb-2">Coordinate Calibration</h3>
+            
+            {geoAxisPoints.length > 0 && (
+              <div className="mb-2">
+                <div className="text-xs font-bold mb-1">Calibration Points:</div>
+                <div className="max-h-40 overflow-y-auto text-xs bg-white p-2 rounded border">
+                  {geoAxisPoints.map((p, idx) => {
+                    const absValue = Math.abs(p.value);
+                    const deg = Math.floor(absValue);
+                    const minFloat = (absValue - deg) * 60;
+                    const min = Math.floor(minFloat);
+                    const sec = ((minFloat - min) * 60).toFixed(1);
+                    const dir = p.type === 'lon' ? (p.value >= 0 ? 'E' : 'W') : (p.value >= 0 ? 'N' : 'S');
+                    
+                    return (
+                      <div key={p.id} className="mb-1 pb-1 border-b last:border-b-0 flex justify-between">
+                        <div>
+                          <div className={`font-bold ${p.type==='lon'?'text-blue-600':'text-red-600'}`}>
+                            #{idx + 1} {p.type==='lon'?'Lon':'Lat'}: {deg}° {min}' {sec}" {dir}
+                          </div>
+                          <div className="text-gray-600">
+                            = {p.value.toFixed(6)}° (px: {Math.round(p.x)}, {Math.round(p.y)})
+                          </div>
+                        </div>
+                        <button onClick={() => setGeoAxisPoints(geoAxisPoints.filter(pt => pt.id!==p.id))}
+                          className="text-red-500 font-bold">✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {geoAxisPoints.filter(p => p.type === 'lon').length >= 2 && geoAxisPoints.filter(p => p.type === 'lat').length >= 2 ? (
+                  <div className="mt-2 p-2 bg-green-50 border border-green-300 rounded text-xs">
+                    ✓ <strong>Ready!</strong> {geoAxisPoints.filter(p => p.type === 'lon').length} lon, {geoAxisPoints.filter(p => p.type === 'lat').length} lat
+                  </div>
+                ) : (
+                  <div className="mt-2 p-2 bg-yellow-50 border border-yellow-300 rounded text-xs">
+                    ⚠ Need 2+ lon & 2+ lat | Currently: {geoAxisPoints.filter(p => p.type === 'lon').length} lon, {geoAxisPoints.filter(p => p.type === 'lat').length} lat
+                  </div>
+                )}
+              </div>
+            )}
+            
+            <button onClick={() => {
+                  if (geoRefMode) {
+                    if (currentGeoPoint && (tempCoordValue || tempDMS.deg)) {
+                      let coordValue = coordFormat === 'dms' 
+                        ? dmsToDecimal(tempDMS.deg, tempDMS.min, tempDMS.sec, tempDMS.dir)
+                        : parseFloat(tempCoordValue);
+                      
+                      const newPoint = {
+                        x: currentGeoPoint.x, 
+                        y: currentGeoPoint.y,
+                        value: coordValue,
+                        type: tempCoordType,
+                        id: Date.now()
+                      };
+                      
+                      setGeoAxisPoints(prev => [...prev, newPoint]);
+                    }
+                    
+                    setCurrentGeoPoint(null);
+                    setTempCoordValue('');
+                    setTempDMS({ deg: '', min: '', sec: '', dir: 'E' });
+                    setStatusMessage(`✓ Calibration done`);
+                  } else {
+                    setStatusMessage('Click tick mark → enter value → repeat');
+                  }
+                  
+                  setGeoRefMode(!geoRefMode);
+                  setCanvasKey(k => k + 1);
+                }}
+                className={`px-3 py-1 text-xs mb-2 rounded ${geoRefMode?'bg-red-500':'bg-purple-500'} text-white`}>
+                {geoRefMode ? '✓ Done Calibrating' : '📍 Calibrate'}
+              </button>
+              
+              {geoRefMode && (
+                <div className="p-2 bg-blue-50 border rounded mb-2">
+                  <div className="text-xs font-bold mb-2">Add Point ({geoAxisPoints.length} saved):</div>
+                  <select value={tempCoordType} onChange={(e) => {
+                    setTempCoordType(e.target.value);
+                    setTempDMS({...tempDMS, dir: e.target.value === 'lon' ? 'E' : 'N'});
+                  }} className="w-full p-1 border rounded text-xs mb-1">
+                    <option value="lon">Longitude</option>
+                    <option value="lat">Latitude</option>
+                  </select>
+                  
+                  <div className="flex gap-1 items-center mb-1">
+                    <input type="number" placeholder="°" value={tempDMS.deg}
+                      onChange={(e) => {
+                        setTempDMS({...tempDMS, deg: e.target.value});
+                        setCurrentGeoPoint(curr => curr ? {...curr} : curr);
+                      }}
+                      className="w-16 p-1 border rounded text-xs"
+                    />
+                    <input type="number" placeholder="'" value={tempDMS.min}
+                      onChange={(e) => setTempDMS({...tempDMS, min: e.target.value})}
+                      className="w-16 p-1 border rounded text-xs"
+                    />
+                    <input type="number" placeholder='"' value={tempDMS.sec}
+                      onChange={(e) => setTempDMS({...tempDMS, sec: e.target.value})}
+                      className="w-16 p-1 border rounded text-xs"
+                    />
+                    <select value={tempDMS.dir}
+                      onChange={(e) => setTempDMS({...tempDMS, dir: e.target.value})}
+                      className="w-14 p-1 border rounded text-xs">
+                      {tempCoordType === 'lon' ? (
+                        <><option>E</option><option>W</option></>
+                      ) : (
+                        <><option>N</option><option>S</option></>
+                      )}
+                    </select>
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    1. Click tick mark<br/>
+                    2. Enter value above<br/>
+                    3. Repeat
+                  </div>
+                </div>
+              )}
+            
+            <div className="flex gap-2">
+              <button onClick={() => {
+                  const canvas = canvasRef.current;
+                  if (!canvas) return;
+                  
+                  const testX = canvas.width / 2;
+                  const testY = canvas.height / 2;
+                  const result = pixelToGeo(testX, testY);
+                  
+                  console.log('Test:', { pixel: { x: testX, y: testY }, result, geoAxisPoints });
+                  
+                  setStatusMessage(`Test: (${Math.round(testX)}, ${Math.round(testY)}) → ${result.lon}°, ${result.lat}°`);
+                }}
+                className="px-3 py-1 text-xs bg-blue-500 text-white rounded">
+                Test
+              </button>
+              
+              <button onClick={() => {
+                  setGeoAxisPoints([]);
+                  setCurrentGeoPoint(null);
+                  setTempCoordValue('');
+                  setTempDMS({ deg: '', min: '', sec: '', dir: 'E' });
+                  setStatusMessage('Cleared');
+                }} 
+                className="px-3 py-1 text-xs bg-red-500 text-white rounded">
+                Clear
+              </button>
+              
+              <button onClick={() => setShowGeoConfig(false)} 
+                className="px-3 py-1 text-xs bg-green-500 text-white rounded">
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+        
+        <div className="grid grid-cols-4 gap-2">
+          <div>
+            <label className="text-xs">Color Tolerance: {tolerance}</label>
+            <input type="range" min="10" max="150" value={tolerance} onChange={(e) => setTolerance(+e.target.value)} className="w-full" />
+          </div>
+          <div>
+            <label className="text-xs">Min Area: {minArea}px</label>
+            <input type="range" min="50" max="2000" step="50" value={minArea} onChange={(e) => setMinArea(+e.target.value)} className="w-full" />
+          </div>
+          <div>
+            <label className="text-xs">Smoothing: {simplification} (higher = smoother)</label>
+            <input type="range" min="0.5" max="10" step="0.5" value={simplification} onChange={(e) => setSimplification(+e.target.value)} className="w-full" />
+          </div>
+          <div>
+            <label className="text-xs">Merge Gaps: {mergeDistance}px</label>
+            <input type="range" min="1" max="20" value={mergeDistance} onChange={(e) => setMergeDistance(+e.target.value)} className="w-full" />
+          </div>
+        </div>
+        
+        <div className="flex gap-2">
+          <button onClick={() => setPickerMode(!pickerMode)}
+            className={`px-3 py-1 text-sm ${pickerMode?'bg-yellow-500':'bg-gray-500'} text-white rounded flex items-center gap-1`}>
+            <Pipette size={16} />
+            {pickerMode ? 'Picking...' : 'Pick Color'}
+          </button>
+          
+          {selectedColor && (
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 border-2 border-gray-400 rounded"
+                style={{backgroundColor: `rgb(${selectedColor.r},${selectedColor.g},${selectedColor.b})`}} />
+              <input type="text" placeholder="Rock name"
+                value={colorNames[`${selectedColor.r},${selectedColor.g},${selectedColor.b}`] || ''}
+                onChange={(e) => setColorNames({...colorNames, [`${selectedColor.r},${selectedColor.g},${selectedColor.b}`]: e.target.value})}
+                className="px-2 py-1 text-xs border rounded" />
+            </div>
+          )}
+          
+          <button onClick={extractPolygons} disabled={!image || !selectedColor || isProcessing}
+            className={`px-3 py-1 text-sm ${isProcessing?'bg-gray-400':'bg-green-500'} text-white rounded flex items-center gap-1`}>
+            <Wand2 size={16} />
+            {isProcessing ? 'Processing...' : 'Extract'}
+          </button>
+          
+          <button onClick={() => setPolygons([])} disabled={polygons.length === 0}
+            className="px-3 py-1 text-sm bg-red-500 text-white rounded flex items-center gap-1">
+            <Trash2 size={16} />
+            Clear ({polygons.length})
+          </button>
+          
+          <button onClick={exportGeoJSON} disabled={polygons.length === 0}
+            className="px-3 py-1 text-sm bg-blue-500 text-white rounded flex items-center gap-1 disabled:bg-gray-400">
+            <Download size={16} />
+            Export ({polygons.length})
+          </button>
+        </div>
+      </div>
+      
+      <div className="flex-1 min-h-[400px] overflow-hidden bg-gray-200 relative">
+        <canvas 
+          key={canvasKey}
+          ref={canvasRef}
+          width={800}
+          height={600}
+          className="absolute inset-0 w-full h-full"
+          style={{cursor: pickerMode || geoRefMode ? 'crosshair' : isPanning ? 'grabbing' : 'grab'}}
+          onClick={handleColorPick}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+        />
+      </div>
+    </div>
+  );
+};
+
+export default GeologicalExtractor;
