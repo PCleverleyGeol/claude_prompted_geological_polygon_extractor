@@ -24,8 +24,9 @@ The map will appear in the canvas below
 
 2. Calibrate Coordinates
 Important: Accurate calibration is critical for proper georeferencing!
-An OCR Tesseract library is included to automatically read Latitude/Longitude but does not run well with Claude 
-So a manual option is also added
+An OCR Tesseract library is included to automatically read Latitude/Longitude but does not run well with Claude
+Use Python environment if you want to use this.
+So a manual option is also added where you need to add 4 points.
 
 Click the "Coords" button
 Click "Calibrate" to enter calibration mode
